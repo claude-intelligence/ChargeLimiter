@@ -1,0 +1,11 @@
+Package: chaoge.ChargeLimiter
+Name: ChargeLimiter
+Version: 1.7
+Description: ChargeLimiter
+Section: Applications
+Depends: firmware (>= 5.0)
+Priority: optional
+Architecture: iphoneos-arm
+Author: chaoge
+Maintainer: chaoge
+
