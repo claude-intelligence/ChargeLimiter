@@ -141,6 +141,19 @@ static NSDictionary* getBatSlimInfo(NSDictionary* info) {
             filtered_info[@"NominalChargeCapacity"] = info[@"AppleRawMaxCapacity"];
         }
     }
+    // Expose only the reported manufacturer; do not infer a cell brand from its serial.
+    id manufacturer = info[@"Manufacturer"];
+    if ([manufacturer isKindOfClass:NSData.class]) {
+        manufacturer = [[NSString alloc] initWithData:manufacturer encoding:NSUTF8StringEncoding];
+    }
+    if ([manufacturer isKindOfClass:NSString.class]) {
+        NSCharacterSet* padding = [NSCharacterSet.whitespaceAndNewlineCharacterSet
+            mutableCopy];
+        NSMutableCharacterSet* trim = [padding mutableCopy];
+        [trim addCharactersInString:[NSString stringWithFormat:@"%C", (unichar)0]];
+        NSString* name = [manufacturer stringByTrimmingCharactersInSet:trim];
+        if (name.length) filtered_info[@"Manufacturer"] = name;
+    }
     if (info[@"AdapterDetails"] != nil) {
         NSDictionary* adaptor_info = info[@"AdapterDetails"];
         NSMutableDictionary* filtered_adaptor_info = [NSMutableDictionary dictionary];
@@ -1276,7 +1289,7 @@ void detectUPSBattery() {
         }
         _webServer = [GCDWebServer new];
         NSString* html_root = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"www"];
-        [_webServer addGETHandlerForBasePath:@"/" directoryPath:html_root indexFilename:@"index.html" cacheAge:1 allowRangeRequests:NO];
+        [_webServer addGETHandlerForBasePath:@"/" directoryPath:html_root indexFilename:@"index.html" cacheAge:0 allowRangeRequests:NO];
         [_webServer addDefaultHandlerForMethod:@"POST" requestClass:GCDWebServerDataRequest.class processBlock:^GCDWebServerResponse*(GCDWebServerDataRequest* request) {
             @autoreleasepool {
                 NSDictionary* nsres = handleReq(request.jsonObject);

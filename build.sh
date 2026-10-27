@@ -125,6 +125,7 @@ ditto "$APP_SOURCE" "$APP_DIR"
 cp "$DAEMON_SOURCE" "$APP_DIR/ChargeLimiterDaemon"
 chmod 755 "$APP_DIR/ChargeLimiterDaemon"
 rm -rf -- "$APP_DIR/_CodeSignature" "$APP_DIR/embedded.mobileprovision"
+python3 "$ROOT_DIR/scripts/version-web-assets.py" "$APP_DIR/www"
 
 # A dynamic GCDWebServers build must travel with the app and daemon.
 if otool -L "$APP_DIR/ChargeLimiter" "$APP_DIR/ChargeLimiterDaemon" | grep -q '@rpath/GCDWebServers.framework/'; then
@@ -145,6 +146,8 @@ python3 "$ROOT_DIR/scripts/verify-ipa.py" "$STAGING_DIR/ChargeLimiter-iOS16.ipa"
 mv -f "$STAGING_DIR/ChargeLimiter.ipa" "$BUILD_DIR/ChargeLimiter.ipa"
 mv -f "$STAGING_DIR/ChargeLimiter-iOS16.ipa" "$BUILD_DIR/ChargeLimiter-iOS16.ipa"
 cp -f "$BUILD_DIR/ChargeLimiter.ipa" "$BUILD_DIR/ChargeLimiter-TrollStore.ipa"
+cp -f "$BUILD_DIR/ChargeLimiter-iOS16.ipa" "$BUILD_DIR/ChargeLimiter-Control.ipa"
+cp -f "$BUILD_DIR/ChargeLimiter-iOS16.ipa" "$BUILD_DIR/ChargeLimiter-UI.ipa"
 printf '\n已生成: %s\n' "$BUILD_DIR/ChargeLimiter.ipa"
 printf '巨魔安装文件: %s\n' "$BUILD_DIR/ChargeLimiter-TrollStore.ipa"
 printf '无压缩兼容测试包: %s\n' "$BUILD_DIR/ChargeLimiter-iOS16.ipa"

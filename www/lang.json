@@ -174,7 +174,10 @@
         "ui_control_read_failed": "Unable to read battery state. Retries stopped.",
         "ui_control_command_failed": "The system could not apply the command. Retries stopped.",
         "ui_full_capacity": "Estimated full capacity",
-        "ui_hardware_ratio": "Current capacity ÷ estimated full capacity × 100%"
+        "ui_hardware_ratio": "Current capacity ÷ estimated full capacity × 100%",
+        "ui_battery_manufacturer": "Battery manufacturer (reported)",
+        "ui_not_reported": "Not reported",
+        "ui_manufacturer_note": "Reported by the battery controller; does not identify a replacement cell brand."
     },
     "zh_CN": {
         "label": "简体中文",
@@ -351,7 +354,10 @@
         "ui_control_read_failed": "无法读取电池状态，已停止重试。",
         "ui_control_command_failed": "系统未能执行控制命令，已停止重试。",
         "ui_full_capacity": "满充估算容量",
-        "ui_hardware_ratio": "实时容量 ÷ 满充估算容量 × 100%"
+        "ui_hardware_ratio": "实时容量 ÷ 满充估算容量 × 100%",
+        "ui_battery_manufacturer": "电池厂商（系统上报）",
+        "ui_not_reported": "未提供",
+        "ui_manufacturer_note": "此项来自电池管理板，不能据此确认更换后电芯的品牌。"
     },
     "zh_TW": {
         "label": "繁體中文",
@@ -528,7 +534,10 @@
         "ui_control_read_failed": "無法讀取電池狀態，已停止重試。",
         "ui_control_command_failed": "系統未能執行控制命令，已停止重試。",
         "ui_full_capacity": "滿充估算容量",
-        "ui_hardware_ratio": "即時容量 ÷ 滿充估算容量 × 100%"
+        "ui_hardware_ratio": "即時容量 ÷ 滿充估算容量 × 100%",
+        "ui_battery_manufacturer": "電池廠商（系統回報）",
+        "ui_not_reported": "未提供",
+        "ui_manufacturer_note": "此項來自電池管理板，不能據此確認更換後電芯的品牌。"
     },
     "ar": {
         "label": "العربية",
@@ -704,7 +713,10 @@
         "ui_control_read_failed": "Unable to read battery state. Retries stopped.",
         "ui_control_command_failed": "The system could not apply the command. Retries stopped.",
         "ui_full_capacity": "Estimated full capacity",
-        "ui_hardware_ratio": "Current capacity ÷ estimated full capacity × 100%"
+        "ui_hardware_ratio": "Current capacity ÷ estimated full capacity × 100%",
+        "ui_battery_manufacturer": "Battery manufacturer (reported)",
+        "ui_not_reported": "Not reported",
+        "ui_manufacturer_note": "Reported by the battery controller; does not identify a replacement cell brand."
     },
     "vi": {
         "label": "Việt Nam",
@@ -881,6 +893,9 @@
         "ui_control_read_failed": "Unable to read battery state. Retries stopped.",
         "ui_control_command_failed": "The system could not apply the command. Retries stopped.",
         "ui_full_capacity": "Estimated full capacity",
-        "ui_hardware_ratio": "Current capacity ÷ estimated full capacity × 100%"
+        "ui_hardware_ratio": "Current capacity ÷ estimated full capacity × 100%",
+        "ui_battery_manufacturer": "Battery manufacturer (reported)",
+        "ui_not_reported": "Not reported",
+        "ui_manufacturer_note": "Reported by the battery controller; does not identify a replacement cell brand."
     }
 }

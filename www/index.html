@@ -438,6 +438,12 @@
         </el-row>
         <el-divider class="my-0" direction="horizontal"></el-divider>
         <el-row class="py-2 col-item">
+          <el-label>{{$t('ui_battery_manufacturer')}}</el-label>
+          <el-label class="right">{{bat_info.Manufacturer || $t('ui_not_reported')}}</el-label>
+          <small class="capacity-field-name">{{$t('ui_manufacturer_note')}}</small>
+        </el-row>
+        <el-divider class="my-0" direction="horizontal"></el-divider>
+        <el-row class="py-2 col-item">
           <el-label>{{$t("Serial")}}</el-label>
           <el-label class="right">{{bat_info.Serial}}</el-label>
         </el-row>
