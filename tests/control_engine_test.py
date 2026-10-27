@@ -139,6 +139,26 @@ int main() { @autoreleasepool {
     reset();stubbornInflow=true;hardware[@"ExternalConnected"]=@NO;hardware[@"IsCharging"]=@NO;
     hardware[@"InstantAmperage"]=@0;hardware[@"AppleRawCurrentCapacity"]=@4100;onBatteryEvent(1);
     assert([g_control_state isEqual:@"confirmed"] && writes==1);
+    // Input restoration may cause a rising adapter flag on each read-back.
+    // Such edges must not restart an in-flight confirmation episode.
+    reset();stubborn=true;hardware[@"AppleRawCurrentCapacity"]=@4100;
+    hardware[@"IsCharging"]=@NO;hardware[@"InstantAmperage"]=@2;
+    onBatteryEvent(1);assert(writes==1 && [g_control_state isEqual:@"pending"]);
+    for(int j=0;j<3;++j) {
+        NSMutableDictionary* previous=[bat_info mutableCopy];
+        previous[@"ExternalChargeCapable"]=@NO;bat_info=previous;
+        expire();
+    }
+    assert(writes==3 && [g_control_state isEqual:@"failed"]);
+    // A UI refresh must reconcile an overdue pending state as well.
+    reset();stubborn=true;hardware[@"AppleRawCurrentCapacity"]=@4100;
+    hardware[@"IsCharging"]=@NO;hardware[@"InstantAmperage"]=@2;
+    onBatteryEvent(1);
+    for(int j=0;j<3;++j) {
+        g_control_retry.due=NSProcessInfo.processInfo.systemUptime-1;
+        handleReqLocked(@{@"api":@"get_bat_info"});
+    }
+    assert(writes==3 && [g_control_state isEqual:@"failed"]);
     puts("Actual daemon controller/API passed: immediate settings, read-back, retry limits, cancel, mAh resume, manual, temperature and read failure");
 }}
 '''

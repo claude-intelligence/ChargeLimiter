@@ -687,7 +687,9 @@ static void onBatteryEvent(io_service_t serv) {
         BOOL connected = isAdaptorConnect(bat_info, disableInflow);
         BOOL newPlug = isAdaptorNewConnect(old, bat_info, disableInflow);
         if (!connected || newPlug) g_manual_stop = NO;
-        if (newPlug) { cancelControl(); g_policy_memory = {}; }
+        // Restoring input can itself make the adapter flags rise. Keep an active
+        // confirmation episode so this read-back transition cannot reset retries.
+        if (newPlug && !g_control_retry.pending) { cancelControl(); g_policy_memory = {}; }
         ChargePolicy::Input input;
         input.enabled = g_enable;
         input.connected = connected;
@@ -958,6 +960,9 @@ static NSDictionary* handleReqLocked(NSDictionary* nsreq) {
             @"status": @0,
         };
     } else if ([api isEqualToString:@"get_bat_info"]) {
+        // Advance confirmation even if the run-loop verification callback is late.
+        // applyControl still enforces the same write deadlines and retry limit.
+        if (g_control_retry.pending) onBatteryEvent(getIOPMPSServ());
         if (gUPSPS.props != nil) {
             return @{
                 @"status": @0,
