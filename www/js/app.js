@@ -177,6 +177,7 @@ const App = {
             charge_above_unit: "mah",
             charge_above_mah: 4308,
             charge_below_mah: 4100,
+            full_mah: 0,
             control_status: {},
             enable_temp: false,
             temp_mode: 0,
@@ -239,9 +240,40 @@ const App = {
         }
     },
     methods: {
-        mah_limit_unreachable: function() { // 上限高于电池实际满容量时mAh控制会失效
+        predictive_inhibit_text: function() { // 真机对照用: 原始禁充标志
+            var v = this.bat_info == null ? null : this.bat_info.PredictiveChargingInhibit;
+            if (v == null) return this.$t('ui_not_reported');
+            return v ? this.$t('ui_inhibit_on') : this.$t('ui_inhibit_off');
+        },
+        effective_full_mah: function() { // 用户填了实际满容量就用它, 否则用系统学习值
+            if (this.full_mah > 0) return this.full_mah;
             var full = this.bat_info == null ? null : this.bat_info.NominalChargeCapacity;
-            return full != null && full > 0 && this.charge_above_mah > full;
+            return full != null && full > 0 ? full : null;
+        },
+        scaled_mah: function() { // 和daemon一致: 按实际满容量把被压住的读数换算回来
+            var raw = this.bat_info == null ? null : this.bat_info.AppleRawCurrentCapacity;
+            if (typeof raw !== 'number' || !isFinite(raw)) return null;
+            var nominal = this.bat_info.NominalChargeCapacity;
+            if (!(this.full_mah > 0) || typeof nominal !== 'number' || !(nominal > 0)) return raw;
+            return Math.round(raw * this.full_mah / nominal);
+        },
+        mah_limit_above_estimate: function() { // 上限高于真实满容量时永远充不到, 只会停在满电
+            var full = this.effective_full_mah();
+            return full != null && this.charge_above_mah > full;
+        },
+        set_full_mah: function(v) {
+            if (!Number.isInteger(v) || v < 0 || v > 20000 || (v !== 0 && v < 1000)) {
+                this.get_conf();
+                return;
+            }
+            this.ipc_send_wrapper({
+                api: "set_conf",
+                key: "full_mah",
+                val: v,
+            });
+            if (!window.test) {
+                setTimeout(this.get_conf, 1000);
+            }
         },
         get_live_capacity: function() {
             var value = this.bat_info.AppleRawCurrentCapacity;
@@ -252,7 +284,7 @@ const App = {
             return typeof value === 'number' && isFinite(value) ? Math.min(100, Math.max(0, value)) : '—';
         },
         get_target_progress: function() {
-            var value = this.charge_above_unit === 'mah' ? this.bat_info.AppleRawCurrentCapacity : this.bat_info.CurrentCapacity;
+            var value = this.charge_above_unit === 'mah' ? this.scaled_mah() : this.bat_info.CurrentCapacity;
             var target = this.charge_above_unit === 'mah' ? this.charge_above_mah : this.charge_above;
             return typeof value === 'number' && isFinite(value) && target > 0 ? Math.min(100, Math.max(0, value / target * 100)) : 0;
         },
@@ -268,6 +300,7 @@ const App = {
             if (control.state === 'failed') return 'ui_control_failed';
             if (control.state === 'unavailable') return 'ui_reason_invalid_data';
             if (control.state === 'pending') return control.target === 0 ? 'ui_confirm_stop' : 'ui_confirm_start';
+            if (control.reason === 'no_power') return 'ui_on_battery';
             if (['capacity', 'temperature', 'manual', 'disabled', 'low_battery', 'edge', 'invalid_data'].indexOf(control.reason) >= 0) return 'ui_reason_' + control.reason;
             if (this.is_charge()) return 'ui_charging';
             if (control.reason === 'waiting') return 'ui_waiting_resume';
@@ -653,6 +686,10 @@ const App = {
             }
         },
         is_charge: function() {
+            if (this.bat_info.PredictiveChargingInhibit) return false;
+            if (this.adv_predictive_inhibit_charge && (this.bat_info.PredictiveChargingInhibit === false || this.bat_info.PredictiveChargingInhibit === 0) &&
+                typeof this.bat_info.InstantAmperage === 'number' && isFinite(this.bat_info.InstantAmperage) &&
+                this.bat_info.InstantAmperage <= 10) return false;
             if (this.bat_info.IsCharging) {
                 return true;
             }

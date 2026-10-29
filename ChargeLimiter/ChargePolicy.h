@@ -7,8 +7,7 @@ struct Input {
     bool enabled = false, connected = false, newPlug = false, manualStop = false;
     bool useMah = true, temperatureEnabled = false, plugMode = true;
     double percent = NAN, mah = NAN, temperature = NAN;
-    double fullMah = NAN; // NominalChargeCapacity: 电池实际满容量
-
+    double fullMah = NAN; // 真实满容量(用户可填): 读数被电量计压在这里, 再高的上限也触发不了
     double stopPercent = 80, startPercent = 20, stopMah = 4308, startMah = 4100;
     double stopTemperature = 35, startTemperature = 10;
 };
@@ -20,15 +19,16 @@ inline Decision evaluate(const Input& i, Memory& m) {
     if (!i.connected) { m = {}; return {-1, Reason::NoPower, false}; }
     if (!valid(i.percent) || i.percent < 0 || i.percent > 100) return {-1, Reason::InvalidData, false};
     if (i.percent <= 5) { m = {}; return {1, Reason::LowBattery, false}; }
-    // 上限高于电池实际满容量时读数永远到不了, mAh控制会静默失效, 必须回落到百分比
-    bool reachable = !(valid(i.fullMah) && i.fullMah > 0 && i.stopMah > i.fullMah);
-    bool mah = i.useMah && valid(i.mah) && i.mah > 0 && reachable;
+    // The learned full-capacity estimate is not a ceiling for the live reading.
+    bool mah = i.useMah && valid(i.mah) && i.mah > 0;
     double capacity = mah ? i.mah : i.percent;
     double upper = mah ? i.stopMah : i.stopPercent;
     double lower = mah ? i.startMah : i.startPercent;
     bool fallback = i.useMah && !mah;
     if (!(valid(upper) && valid(lower) && lower >= 0 && upper > lower)) return {-1, Reason::InvalidData, fallback};
     if (capacity >= upper) m.capacityHold = true;
+    // 上限高于真实满容量时读数永远到不了, 读到满就得停, 否则限充等于没开
+    if (mah && valid(i.fullMah) && i.fullMah > 0 && upper > i.fullMah && capacity >= i.fullMah) m.capacityHold = true;
     if (m.capacityHold && capacity <= lower) m.capacityHold = false;
     bool wasHot = m.temperatureHold;
     if (!i.temperatureEnabled) m.temperatureHold = false;

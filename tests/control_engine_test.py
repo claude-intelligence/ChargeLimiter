@@ -34,6 +34,7 @@ static NSMutableDictionary* conf;
 static BOOL g_enable=NO, g_enable_floatwnd=NO, g_use_smart=NO;
 static int g_serv_boot=0, writes=0, actions=0, writeError=0, readError=0;
 static bool stubborn=false, stubbornInflow=false;
+static int inflowError=0;
 static int resets=0;
 static id getlocalKV(NSString* key) { return conf[key]; }
 static void setlocalKV(NSString* key,id val) { conf[key]=val; }
@@ -45,6 +46,7 @@ static int getBatInfoWithServ(io_service_t serv,NSDictionary* __strong* result) 
 }
 static int getBatInfo(NSDictionary* __strong* result) { return getBatInfoWithServ(1,result); }
 static int setInflowStatus(BOOL value) {
+    if (inflowError) return inflowError;
     if (!writeError && !stubborn && !stubbornInflow) hardware[@"ExternalConnected"]=@(value);
     return writeError;
 }
@@ -56,6 +58,7 @@ static int setBatteryStatus(BOOL value) {
             // 不再反映真实状态, 只有PredictiveChargingInhibit是真的开关
             hardware[@"IsCharging"]=@YES;
             hardware[@"PredictiveChargingInhibit"]=@(!value);
+            hardware[@"InstantAmperage"]=value ? @295 : @0;
         } else {
             hardware[@"IsCharging"]=@(value);
             hardware[@"InstantAmperage"]=value ? @295 : @0;
@@ -100,7 +103,7 @@ static void reset() {
                @"Temperature":@2500,@"PostChargeWaitSeconds":@120,@"AdapterDetails":@{@"Description":@"usb host"}} mutableCopy];
     bat_info=hardware.copy; writeError=0; readError=0; stubborn=false; stubbornInflow=false; writes=0; actions=0;
     g_manual_stop=NO; g_policy_memory={}; g_verify_scheduled=NO; scheduled=nil; g_inhibit_active=NO;
-    cancelControl(); initConf(NO); g_enable=YES; conf[@"enable"]=@YES;
+    inflowError=0; cancelControl(); initConf(NO); g_enable=YES; conf[@"enable"]=@YES;
     conf[@"adv_predictive_inhibit_charge"]=@NO; resets=0;
 }
 static NSDictionary* set(NSString* key,id value) { return handleReqLocked(@{@"api":@"set_conf",@"key":key,@"val":value}); }
@@ -126,6 +129,17 @@ int main() { @autoreleasepool {
     for(int j=0;j<20;++j) onBatteryEvent(1); assert(writes==3);
     stubborn=false; hardware[@"AppleRawCurrentCapacity"]=@4200; handleReqLocked(@{@"api":@"retry_control"});
     assert(writes==4 && [g_control_state isEqual:@"confirmed"]);
+    // A plugged-in adapter is still connected when ChargeCapable is false at full/paused.
+    reset();stubborn=true;hardware[@"ExternalChargeCapable"]=@NO;
+    hardware[@"AppleRawCurrentCapacity"]=@4100;hardware[@"IsCharging"]=@NO;
+    hardware[@"InstantAmperage"]=@2;onBatteryEvent(1);
+    assert([g_control_state isEqual:@"pending"] && [g_control_reason isEqual:@"resume"]);
+    // Failed input restoration must keep ownership so retries can still see the adapter.
+    reset();conf[@"adv_disable_inflow"]=@YES;hardware[@"AppleRawCurrentCapacity"]=@4308;
+    onBatteryEvent(1);assert(g_inhibit_active);
+    hardware[@"AppleRawCurrentCapacity"]=@4100;hardware[@"ExternalChargeCapable"]=@NO;inflowError=-2;
+    onBatteryEvent(1);assert(g_inhibit_active && [g_control_state isEqual:@"pending"]);
+    inflowError=0;expire();assert(!g_inhibit_active && [g_control_state isEqual:@"confirmed"]);
     reset(); writeError=-2; hardware[@"AppleRawCurrentCapacity"]=@4500; onBatteryEvent(1);
     expire(); expire(); expire(); assert(writes==3 && g_control_error==-2 && [g_control_state isEqual:@"failed"]);
     reset(); stubborn=true; hardware[@"AppleRawCurrentCapacity"]=@4500; onBatteryEvent(1);
@@ -210,12 +224,82 @@ int main() { @autoreleasepool {
            [hardware[@"IsCharging"] boolValue] && [hardware[@"PredictiveChargingInhibit"] boolValue]);
     for(int j=0;j<5;++j) expire();
     assert(writes==1 && [g_control_state isEqual:@"confirmed"]);
-    // mAh上限高于电池实际满容量时读数永远到不了, 必须回落到百分比而不是静默失效
+    // Nominal is only an estimate: keep the user's live mAh thresholds above it.
     reset();hardware[@"NominalChargeCapacity"]=@4150;
     hardware[@"AppleRawCurrentCapacity"]=@4120;hardware[@"CurrentCapacity"]=@70;onBatteryEvent(1);
-    assert(g_control_fallback && [g_control_reason isEqual:@"waiting"]);
+    assert(!g_control_fallback && [g_control_reason isEqual:@"waiting"]);
     hardware[@"CurrentCapacity"]=@85;onBatteryEvent(1);
-    assert(g_control_fallback && [g_control_reason isEqual:@"capacity"] && ![hardware[@"IsCharging"] boolValue]);
+    assert(!g_control_fallback && [g_control_reason isEqual:@"waiting"] && writes==0);
+    hardware[@"AppleRawCurrentCapacity"]=@4308;onBatteryEvent(1);
+    assert([g_control_reason isEqual:@"capacity"] && ![hardware[@"IsCharging"] boolValue]);
+    // A full percentage or raw reading above Nominal must not hide an active inhibit.
+    for (int percent=99;percent<=100;++percent) {
+        reset();conf[@"adv_predictive_inhibit_charge"]=@YES;stubborn=true;
+        hardware[@"NominalChargeCapacity"]=@4086;hardware[@"AppleRawCurrentCapacity"]=@4100;
+        hardware[@"CurrentCapacity"]=@(percent);hardware[@"IsCharging"]=@YES;
+        hardware[@"PredictiveChargingInhibit"]=@YES;hardware[@"InstantAmperage"]=@2;
+        onBatteryEvent(1);assert(writes==1 && [g_control_state isEqual:@"pending"]);
+        expire();expire();expire();assert([g_control_state isEqual:@"failed"] && writes==3);
+    }
+    reset();stubborn=true;hardware[@"NominalChargeCapacity"]=@4086;
+    hardware[@"AppleRawCurrentCapacity"]=@4100;hardware[@"IsCharging"]=@NO;
+    hardware[@"InstantAmperage"]=@2;onBatteryEvent(1);
+    assert(writes==1 && [g_control_state isEqual:@"pending"]);
+    // A command retry and unrelated configuration change must not release a held stop.
+    reset();hardware[@"AppleRawCurrentCapacity"]=@4308;onBatteryEvent(1);
+    hardware[@"AppleRawCurrentCapacity"]=@4200;onBatteryEvent(1);
+    int heldResets=resets;
+    handleReqLocked(@{@"api":@"retry_control"});
+    assert(resets==heldResets && ![hardware[@"IsCharging"] boolValue]);
+    set(@"enable_temp",@YES);
+    assert(resets==heldResets && [g_control_reason isEqual:@"capacity"] && ![hardware[@"IsCharging"] boolValue]);
+    // Partial writes still own the successfully issued battery stop.
+    reset();inflowError=-2;hardware[@"ExternalConnected"]=@NO;
+    hardware[@"AppleRawCurrentCapacity"]=@4308;onBatteryEvent(1);
+    assert(g_inhibit_active && writes==1);
+    hardware[@"ExternalChargeCapable"]=@NO;hardware[@"AdapterDetails"]=@{@"Description":@"batt"};
+    onBatteryEvent(1);assert(resets==1 && !g_inhibit_active);
+    // Inhibit read-back alone is insufficient if the measured current disagrees.
+    reset();conf[@"adv_predictive_inhibit_charge"]=@YES;stubborn=true;
+    hardware[@"AppleRawCurrentCapacity"]=@4308;hardware[@"PredictiveChargingInhibit"]=@YES;
+    onBatteryEvent(1);assert([g_control_state isEqual:@"pending"]);
+    hardware[@"InstantAmperage"]=@0;onBatteryEvent(1);
+    assert([g_control_state isEqual:@"confirmed"]);
+    reset();conf[@"adv_predictive_inhibit_charge"]=@YES;stubborn=true;
+    hardware[@"AppleRawCurrentCapacity"]=@4100;hardware[@"PredictiveChargingInhibit"]=@NO;
+    hardware[@"InstantAmperage"]=@2;onBatteryEvent(1);
+    assert([g_control_state isEqual:@"pending"]);
+    hardware[@"InstantAmperage"]=@295;onBatteryEvent(1);
+    assert([g_control_state isEqual:@"confirmed"]);
+    // Manual-start errors persist with auto disabled, and explicit retry reissues the start.
+    reset();g_enable=NO;conf[@"enable"]=@NO;stubborn=true;
+    hardware[@"IsCharging"]=@NO;hardware[@"InstantAmperage"]=@2;
+    handleReqLocked(@{@"api":@"set_charge_status",@"flag":@YES});
+    expire();expire();expire();assert([g_control_state isEqual:@"failed"] && writes==3);
+    onBatteryEvent(1);assert([g_control_state isEqual:@"failed"] && writes==3);
+    stubborn=false;handleReqLocked(@{@"api":@"retry_control"});
+    assert(writes==4 && [g_control_state isEqual:@"confirmed"]);
+    // 自定义实际满容量: 电量计压住的读数要按比例换算, 否则mAh上限永远到不了
+    reset(); hardware[@"NominalChargeCapacity"]=@4190; hardware[@"AppleRawCurrentCapacity"]=@4150;
+    conf[@"charge_above_mah"]=@4250; conf[@"charge_below_mah"]=@4000; g_policy_memory={};
+    onBatteryEvent(1); assert(writes==0 && ![g_control_reason isEqual:@"capacity"]);
+    reset(); hardware[@"NominalChargeCapacity"]=@4190; hardware[@"AppleRawCurrentCapacity"]=@4150;
+    conf[@"charge_above_mah"]=@4250; conf[@"charge_below_mah"]=@4000; conf[@"full_mah"]=@4300;
+    g_policy_memory={}; onBatteryEvent(1);
+    assert(writes==1 && [g_control_reason isEqual:@"capacity"] && g_inhibit_active);
+    // 上限高于实际满容量时, 读数顶住就停, 不再无限充
+    reset(); hardware[@"NominalChargeCapacity"]=@4190; hardware[@"AppleRawCurrentCapacity"]=@4190;
+    conf[@"charge_above_mah"]=@4308; conf[@"charge_below_mah"]=@4000; g_policy_memory={};
+    onBatteryEvent(1); assert(writes==1 && [g_control_reason isEqual:@"capacity"]);
+    reset(); assert([set(@"full_mah",@0)[@"status"] intValue]==0);
+    assert([set(@"full_mah",@4300)[@"status"] intValue]==0);
+    assert([set(@"full_mah",@500)[@"status"] intValue]==-1);
+    assert([set(@"full_mah",@25000)[@"status"] intValue]==-1);
+    assert([set(@"full_mah",@4300.5)[@"status"] intValue]==-1);
+    assert([set(@"full_mah",@"4300")[@"status"] intValue]==-1);
+    // 非法值在启动校验时清回自动
+    reset(); conf[@"full_mah"]=@800; initConf(NO);
+    assert([getlocalKV(@"full_mah") intValue]==0);
     puts("Actual daemon controller/API passed: immediate settings, read-back, retry limits, cancel, mAh resume, manual, temperature and read failure");
 }}
 '''

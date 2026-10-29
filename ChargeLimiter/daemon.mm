@@ -235,7 +235,7 @@ static BOOL isAdaptorConnect(NSDictionary* info, NSNumber* disableInflow) { // �
         return adaptorPresent;
     }
     NSNumber* ExternalChargeCapable = info[@"ExternalChargeCapable"];
-    if (ExternalChargeCapable.boolValue) {
+    if (ExternalChargeCapable.boolValue || [info[@"ExternalConnected"] boolValue]) {
         return YES;
     }
     // 自己禁充时ExternalChargeCapable也会变false。若据此判为断电, 控制会被释放而
@@ -582,9 +582,9 @@ static NSDictionary* controlStatus() {
              @"fallback": @(g_control_fallback)};
 }
 
-static void cancelControl() {
+static void cancelControl(BOOL release = YES) {
     // 释放控制绝不能把电池留在自己写入的禁充状态: 之后没有任何路径会再还原它
-    if (g_inhibit_active) {
+    if (release && g_inhibit_active) {
         resetBatteryStatus();
         g_inhibit_active = NO;
     }
@@ -608,10 +608,7 @@ static void scheduleControlCheck() {
 // 已经充满的电池自己就不再取电, 这不是启充命令失败
 static BOOL batteryEffectivelyFull() {
     double percent = batteryNumber(bat_info, @"CurrentCapacity");
-    if (std::isfinite(percent) && percent >= 100) return YES;
-    double now = batteryNumber(bat_info, @"AppleRawCurrentCapacity");
-    double full = batteryNumber(bat_info, @"NominalChargeCapacity");
-    return std::isfinite(now) && std::isfinite(full) && full > 0 && now >= full;
+    return std::isfinite(percent) && percent == 100;
 }
 
 static BOOL controlMatches() {
@@ -631,11 +628,15 @@ static BOOL controlMatches() {
         inhibited = !actualCharging;
     }
     if (g_control_retry.target == 1) {
-        // 放开充电只要求禁充被解除: 满电或过热时电流为0是正常的, 不该判成写入失败
+        // Full-charge estimates must never hide an explicit inhibit still set.
+        if (std::isfinite(inhibit) && inhibit != 0) return NO;
+        if (useInhibit && std::isfinite(amperage) && amperage <= 10 && !batteryEffectivelyFull()) return NO;
+        // At 100%, zero current can be normal after inhibition is cleared.
         if (inhibited && !batteryEffectivelyFull()) return NO;
     } else if (!inhibited) {
         return NO;
     }
+    if (g_control_retry.target == 0 && std::isfinite(amperage) && amperage > 10) return NO;
     if (g_control_retry.inflow >= 0) {
         double inflow = batteryNumber(bat_info, @"ExternalConnected");
         // Some adapters report ExternalConnected=false even while supplying power.
@@ -675,7 +676,9 @@ static int applyControl(int target, int inflow, NSString* reason, BOOL force = N
         int inflowResult = inflow >= 0 ? setInflowStatus(inflow == 1) : 0;
         int chargeResult = setBatteryStatus(target == 1);
         g_control_error = chargeResult != 0 ? chargeResult : inflowResult;
-        if (g_control_error == 0) g_inhibit_active = target == 0;
+        // A successful stop must be tracked even when the separate input write fails.
+        if (chargeResult == 0 && target == 0) g_inhibit_active = YES;
+        else if (chargeResult == 0 && inflowResult == 0) g_inhibit_active = NO;
         NSString* delayKey = target ? @"PostDischargeWaitSeconds" : @"PostChargeWaitSeconds";
         double grace = batteryNumber(bat_info, delayKey);
         grace = std::isfinite(grace) ? std::fmax(10, std::fmin(120, grace)) : 10;
@@ -742,14 +745,22 @@ static void onBatteryEvent(io_service_t serv) {
         input.newPlug = newPlug;
         input.manualStop = g_manual_stop;
         input.percent = batteryNumber(bat_info, @"CurrentCapacity");
-        input.mah = batteryNumber(bat_info, @"AppleRawCurrentCapacity");
+        double rawMah = batteryNumber(bat_info, @"AppleRawCurrentCapacity");
+        double nominalMah = batteryNumber(bat_info, @"NominalChargeCapacity");
+        double fullMah = [getlocalKV(@"full_mah") doubleValue];
+        // 电量计把实时读数压在它学习出的满容量上, 换芯后这个值可能远低于真实容量。
+        // 用户填了实际满容量就按比例换算, 让mAh阈值对应真实容量而不是旧的学习值。
+        if (fullMah > 0 && std::isfinite(nominalMah) && nominalMah > 0 && std::isfinite(rawMah)) {
+            rawMah = rawMah * fullMah / nominalMah;
+        }
+        input.mah = rawMah;
+        input.fullMah = fullMah > 0 ? fullMah : nominalMah;
         input.temperature = batteryNumber(bat_info, @"Temperature") / 100.0;
         input.useMah = [getlocalKV(@"charge_above_unit") isEqualToString:@"mah"];
         input.stopMah = [getlocalKV(@"charge_above_mah") doubleValue];
         input.startMah = [getlocalKV(@"charge_below_mah") doubleValue];
         input.stopPercent = [getlocalKV(@"charge_above") doubleValue];
         input.startPercent = [getlocalKV(@"charge_below") doubleValue];
-        input.fullMah = batteryNumber(bat_info, @"NominalChargeCapacity");
         input.temperatureEnabled = [getlocalKV(@"enable_temp") boolValue];
         input.stopTemperature = getTempAsC(@"charge_temp_above");
         input.startTemperature = getTempAsC(@"charge_temp_below");
@@ -759,7 +770,7 @@ static void onBatteryEvent(io_service_t serv) {
         NSString* reason = reasonName(decision.reason);
         if (!g_enable) {
             if (g_manual_stop && connected) applyControl(0, -1, @"manual");
-            else if (g_control_retry.pending && [g_control_reason isEqualToString:@"manual_start"])
+            else if (g_control_retry.target == 1 && [g_control_reason isEqualToString:@"manual_start"])
                 applyControl(1, 1, @"manual_start");
             else { cancelControl(); g_control_reason = reason; }
         } else if (decision.charge >= 0) {
@@ -777,9 +788,8 @@ static void onBatteryEvent(io_service_t serv) {
 }
 
 static void reevaluateControl(BOOL clearManual = NO) {
-    cancelControl();
-    g_policy_memory = {};
-    if (clearManual) g_manual_stop = NO;
+    cancelControl(NO);
+    if (clearManual) { g_policy_memory = {}; g_manual_stop = NO; }
     onBatteryEvent(getIOPMPSServ());
 }
 
@@ -795,6 +805,7 @@ static void initConf(BOOL reset) {
         @"charge_above_unit": @"mah",
         @"charge_above_mah": @4308,
         @"charge_below_mah": @4100,
+        @"full_mah": @0, // 0=用系统上报的NominalChargeCapacity
         @"enable_temp": @NO,
         @"temp_mode": @0,
         @"charge_temp_above": @35,
@@ -865,6 +876,11 @@ static void initConf(BOOL reset) {
     double lower = [getlocalKV(@"charge_below_mah") doubleValue];
     if (!std::isfinite(lower) || lower < 1 || lower >= upper) {
         setlocalKV(@"charge_below_mah", @((int)std::fmin(4100, upper - 1)));
+    }
+    double fullMahConf = [getlocalKV(@"full_mah") doubleValue];
+    if (!std::isfinite(fullMahConf) || fullMahConf < 0 || fullMahConf > 20000 ||
+        (fullMahConf > 0 && fullMahConf < 1000)) {
+        setlocalKV(@"full_mah", @0);
     }
     double lowerPercent = [getlocalKV(@"charge_below") doubleValue];
     double upperPercent = [getlocalKV(@"charge_above") doubleValue];
@@ -952,6 +968,14 @@ static NSDictionary* handleReqLocked(NSDictionary* nsreq) {
             double upper = [key isEqualToString:@"charge_above_mah"] ? [val doubleValue] : [getlocalKV(@"charge_above_mah") doubleValue];
             if (lower >= upper) return @{@"status": @-1};
         }
+        if ([key isEqualToString:@"full_mah"]) {
+            // 0表示自动用系统上报值; 非0必须是像容量的整数, 否则换算会把阈值算歪
+            if (![val isKindOfClass:NSNumber.class] || !std::isfinite([val doubleValue]) ||
+                [val doubleValue] != [val longLongValue] ||
+                ([val doubleValue] != 0 && ([val doubleValue] < 1000 || [val doubleValue] > 20000))) {
+                return @{@"status": @-1};
+            }
+        }
         if ([@[@"charge_below", @"charge_above"] containsObject:key]) {
             if (![val isKindOfClass:NSNumber.class] || !std::isfinite([val doubleValue]) ||
                 [val doubleValue] != [val longLongValue]) return @{@"status": @-1};
@@ -1022,7 +1046,7 @@ static NSDictionary* handleReqLocked(NSDictionary* nsreq) {
                 setlocalKV(@"charge_temp_above", vals[1]);
             }
         }
-        if ([@[@"enable", @"charge_above_mah", @"charge_below_mah", @"charge_above_unit",
+        if ([@[@"enable", @"charge_above_mah", @"charge_below_mah", @"charge_above_unit", @"full_mah",
                 @"charge_below", @"charge_above", @"enable_temp", @"charge_temp_above",
                 @"charge_temp_below", @"temp_mode", @"mode", @"adv_disable_inflow",
                 @"adv_predictive_inhibit_charge"] containsObject:key]) {
@@ -1077,7 +1101,11 @@ static NSDictionary* handleReqLocked(NSDictionary* nsreq) {
             @"status": @(status)
         };
     } else if ([api isEqualToString:@"retry_control"]) {
-        cancelControl();
+        // Preserve the last requested target, including a manual start with auto disabled.
+        g_control_retry.reset(g_control_retry.target, g_control_retry.inflow);
+        g_control_state = @"idle";
+        g_control_error = 0;
+        g_control_notified = NO;
         onBatteryEvent(getIOPMPSServ());
         return @{@"status": @0, @"control_status": controlStatus()};
     } else if ([api isEqualToString:@"set_inflow_status"]) {
