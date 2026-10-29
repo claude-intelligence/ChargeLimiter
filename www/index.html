@@ -115,6 +115,7 @@
           </el-select>
         </el-row>
         <el-row class="pb-2 col-item subtitle" v-if="charge_above_unit === 'mah'">{{$t("charge_above_mah_desc", {percent: charge_above})}}</el-row>
+        <el-row class="pb-2 col-item subtitle warn-text" v-if="charge_above_unit === 'mah' && mah_limit_unreachable()">{{$t("charge_above_mah_warn", {full: bat_info.NominalChargeCapacity, percent: charge_above})}}</el-row>
         <el-row v-if="show_sliders['hc'] && charge_above_unit === 'percent'">
           <el-slider v-model="charge_above" :min="charge_below+5" :max="100" :step="1" :marks="marks_perc" @change="set_charge_above"></el-slider>
         </el-row>

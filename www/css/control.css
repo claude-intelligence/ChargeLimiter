@@ -194,6 +194,7 @@
   --line: #eaf0ec;
   --accent: #168455;
   --accent-soft: #e9f5ed;
+  --warn: #b5700f;
 }
 body.night {
   --canvas: #101613;
@@ -203,6 +204,7 @@ body.night {
   --line: #2c3931;
   --accent: #68d89b;
   --accent-soft: #243b2d;
+  --warn: #e0a458;
   background: var(--canvas) !important;
   color: var(--text) !important;
 }
@@ -259,6 +261,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .el-divider--horizontal, .night .el-divider--horizontal { background: var(--line) !important; }
 .submenu { margin-left: 0; font-size: 11px; color: var(--muted); }
 .subtitle, .subsubbtitle { color: var(--muted); }
+.warn-text, .subtitle.warn-text { color: var(--warn); }
 .el-card .input_number .mt-3 { margin-top: 7px !important; }
 .input_number el-label { font-size: 13px; }
 .el-input-number--mini { line-height: 34px; }

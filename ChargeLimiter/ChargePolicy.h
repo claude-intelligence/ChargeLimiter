@@ -7,6 +7,8 @@ struct Input {
     bool enabled = false, connected = false, newPlug = false, manualStop = false;
     bool useMah = true, temperatureEnabled = false, plugMode = true;
     double percent = NAN, mah = NAN, temperature = NAN;
+    double fullMah = NAN; // NominalChargeCapacity: 电池实际满容量
+
     double stopPercent = 80, startPercent = 20, stopMah = 4308, startMah = 4100;
     double stopTemperature = 35, startTemperature = 10;
 };
@@ -18,7 +20,9 @@ inline Decision evaluate(const Input& i, Memory& m) {
     if (!i.connected) { m = {}; return {-1, Reason::NoPower, false}; }
     if (!valid(i.percent) || i.percent < 0 || i.percent > 100) return {-1, Reason::InvalidData, false};
     if (i.percent <= 5) { m = {}; return {1, Reason::LowBattery, false}; }
-    bool mah = i.useMah && valid(i.mah) && i.mah > 0;
+    // 上限高于电池实际满容量时读数永远到不了, mAh控制会静默失效, 必须回落到百分比
+    bool reachable = !(valid(i.fullMah) && i.fullMah > 0 && i.stopMah > i.fullMah);
+    bool mah = i.useMah && valid(i.mah) && i.mah > 0 && reachable;
     double capacity = mah ? i.mah : i.percent;
     double upper = mah ? i.stopMah : i.stopPercent;
     double lower = mah ? i.startMah : i.startPercent;

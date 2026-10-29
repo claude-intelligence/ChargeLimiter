@@ -129,7 +129,8 @@ static NSDictionary* getBatSlimInfo(NSDictionary* info) {
     NSMutableDictionary* filtered_info = [NSMutableDictionary dictionary];
     NSArray* keep = @[
         @"Amperage", @"AppleRawCurrentCapacity", @"BatteryInstalled", @"BootVoltage", @"CurrentCapacity", @"CycleCount", @"DesignCapacity", @"ExternalChargeCapable", @"ExternalConnected",
-        @"InstantAmperage", @"IsCharging", @"NominalChargeCapacity", @"PostChargeWaitSeconds", @"PostDischargeWaitSeconds", @"Serial", @"Temperature",
+        @"InstantAmperage", @"IsCharging", @"NominalChargeCapacity", @"PostChargeWaitSeconds", @"PostDischargeWaitSeconds",
+        @"PredictiveChargingInhibit", @"Serial", @"Temperature",
         @"UpdateTime", @"VirtualTemperature", @"Voltage"];
     for (NSString* key in info) {
         if ([keep containsObject:key]) {
@@ -218,26 +219,32 @@ static int setInflowStatus(BOOL flag) {
     return 0;
 }
 
+// 自己下发的停充命令正在生效时为YES, 供电源判断区分"自己禁充"和"真的拔了线"
+static BOOL g_inhibit_active = NO;
+
 static BOOL isAdaptorConnect(NSDictionary* info, NSNumber* disableInflow) { // 是否连接电源
     if (gUPSPS != nil) { // UPS电源
         // 使用SBC时ExternalConnected/ExternalChargeCapable一直为false
         return YES;
     }
     // 某些充电器ExternalConnected为false,而禁流时ExternalConnected/ExternalChargeCapable均为false
+    NSDictionary* AdapterDetails = info[@"AdapterDetails"];
+    NSString* PSDesc = [AdapterDetails isKindOfClass:NSDictionary.class] ? AdapterDetails[@"Description"] : nil;
+    BOOL adaptorPresent = [PSDesc isKindOfClass:NSString.class] && ![PSDesc isEqualToString:@"batt"];
     if (disableInflow.boolValue) { // 禁流模式下只能通过电源信息判断, 某些时候系统会缓存该信息导致不准确
-        NSDictionary* AdapterDetails = info[@"AdapterDetails"];
-        if (AdapterDetails == nil) {
-            return NO;
-        }
-        NSString* PSDesc = AdapterDetails[@"Description"];
-        if (PSDesc == nil || [PSDesc isEqualToString:@"batt"]) {
-            return NO;
-        }
-        return YES;
-    } else {
-        NSNumber* ExternalChargeCapable = info[@"ExternalChargeCapable"];
-        return ExternalChargeCapable.boolValue;
+        return adaptorPresent;
     }
+    NSNumber* ExternalChargeCapable = info[@"ExternalChargeCapable"];
+    if (ExternalChargeCapable.boolValue) {
+        return YES;
+    }
+    // 自己禁充时ExternalChargeCapable也会变false。若据此判为断电, 控制会被释放而
+    // 电池仍停在禁充状态, 且之后看不到插入沿、永远无法恢复, 所以禁充期间另寻依据
+    if (g_inhibit_active) {
+        NSNumber* ExternalConnected = info[@"ExternalConnected"];
+        return ExternalConnected.boolValue || adaptorPresent;
+    }
+    return NO;
 }
 
 static BOOL isAdaptorNewConnect(NSDictionary* oldInfo, NSDictionary* info, NSNumber* disableInflow) {
@@ -524,6 +531,15 @@ static float getTempAsC(NSString* key) {
     return 0;
 }
 
+static void setTempAsC(NSString* key, double temp_c) {
+    NSNumber* temp_mode = getlocalKV(@"temp_mode");
+    if (temp_mode.intValue == 1) { // °F
+        setlocalKV(key, @((int)std::round(temp_c * 1.8 + 32)));
+    } else {
+        setlocalKV(key, @((int)std::round(temp_c)));
+    }
+}
+
 static ChargePolicy::Memory g_policy_memory;
 static ChargePolicy::Retry g_control_retry;
 static BOOL g_manual_stop = NO;
@@ -567,6 +583,11 @@ static NSDictionary* controlStatus() {
 }
 
 static void cancelControl() {
+    // 释放控制绝不能把电池留在自己写入的禁充状态: 之后没有任何路径会再还原它
+    if (g_inhibit_active) {
+        resetBatteryStatus();
+        g_inhibit_active = NO;
+    }
     g_control_retry.reset(-1, -1);
     g_control_state = @"idle";
     g_control_error = 0;
@@ -584,20 +605,44 @@ static void scheduleControlCheck() {
     });
 }
 
+// 已经充满的电池自己就不再取电, 这不是启充命令失败
+static BOOL batteryEffectivelyFull() {
+    double percent = batteryNumber(bat_info, @"CurrentCapacity");
+    if (std::isfinite(percent) && percent >= 100) return YES;
+    double now = batteryNumber(bat_info, @"AppleRawCurrentCapacity");
+    double full = batteryNumber(bat_info, @"NominalChargeCapacity");
+    return std::isfinite(now) && std::isfinite(full) && full > 0 && now >= full;
+}
+
 static BOOL controlMatches() {
     double charging = batteryNumber(bat_info, @"IsCharging");
     double amperage = batteryNumber(bat_info, @"InstantAmperage");
-    if (!std::isfinite(charging) && !std::isfinite(amperage)) return NO;
-    BOOL actualCharging = std::isfinite(charging) && charging != 0;
-    if (std::isfinite(amperage) && amperage > 10) actualCharging = YES;
-    if (actualCharging != (g_control_retry.target == 1)) return NO;
+    double inhibit = batteryNumber(bat_info, @"PredictiveChargingInhibit");
+    // 预测禁充模式下IsCharging被强制写成YES, 只有PredictiveChargingInhibit反映真实状态
+    BOOL useInhibit = [getlocalKV(@"adv_predictive_inhibit_charge") boolValue] && std::isfinite(inhibit);
+    if (!useInhibit && !std::isfinite(charging) && !std::isfinite(amperage)) return NO;
+    BOOL inhibited;
+    if (useInhibit) {
+        inhibited = inhibit != 0;
+    } else {
+        BOOL actualCharging = std::isfinite(charging) && charging != 0;
+        if (std::isfinite(amperage) && amperage > 10) actualCharging = YES;
+        else if (std::isfinite(amperage) && amperage <= 0) actualCharging = NO;
+        inhibited = !actualCharging;
+    }
+    if (g_control_retry.target == 1) {
+        // 放开充电只要求禁充被解除: 满电或过热时电流为0是正常的, 不该判成写入失败
+        if (inhibited && !batteryEffectivelyFull()) return NO;
+    } else if (!inhibited) {
+        return NO;
+    }
     if (g_control_retry.inflow >= 0) {
         double inflow = batteryNumber(bat_info, @"ExternalConnected");
         // Some adapters report ExternalConnected=false even while supplying power.
         double capable = batteryNumber(bat_info, @"ExternalChargeCapable");
         if (g_control_retry.inflow == 1) {
             if (!(std::isfinite(inflow) && inflow != 0) &&
-                !(std::isfinite(capable) && capable != 0) && !(gUPSPS != nil && actualCharging)) return NO;
+                !(std::isfinite(capable) && capable != 0) && !(gUPSPS != nil && !inhibited)) return NO;
         } else if (!std::isfinite(inflow) || inflow != 0) return NO;
     }
     return YES;
@@ -630,6 +675,7 @@ static int applyControl(int target, int inflow, NSString* reason, BOOL force = N
         int inflowResult = inflow >= 0 ? setInflowStatus(inflow == 1) : 0;
         int chargeResult = setBatteryStatus(target == 1);
         g_control_error = chargeResult != 0 ? chargeResult : inflowResult;
+        if (g_control_error == 0) g_inhibit_active = target == 0;
         NSString* delayKey = target ? @"PostDischargeWaitSeconds" : @"PostChargeWaitSeconds";
         double grace = batteryNumber(bat_info, delayKey);
         grace = std::isfinite(grace) ? std::fmax(10, std::fmin(120, grace)) : 10;
@@ -703,6 +749,7 @@ static void onBatteryEvent(io_service_t serv) {
         input.startMah = [getlocalKV(@"charge_below_mah") doubleValue];
         input.stopPercent = [getlocalKV(@"charge_above") doubleValue];
         input.startPercent = [getlocalKV(@"charge_below") doubleValue];
+        input.fullMah = batteryNumber(bat_info, @"NominalChargeCapacity");
         input.temperatureEnabled = [getlocalKV(@"enable_temp") boolValue];
         input.stopTemperature = getTempAsC(@"charge_temp_above");
         input.startTemperature = getTempAsC(@"charge_temp_below");
@@ -751,7 +798,7 @@ static void initConf(BOOL reset) {
         @"enable_temp": @NO,
         @"temp_mode": @0,
         @"charge_temp_above": @35,
-        @"charge_temp_below": @10,
+        @"charge_temp_below": @30,
         @"acc_charge": @NO,
         @"acc_charge_airmode": @YES,
         @"acc_charge_wifi": @NO,
@@ -786,6 +833,7 @@ static void initConf(BOOL reset) {
         }
         if (resetBattery) {
             resetBatteryStatus();
+            g_inhibit_active = NO;
         }
         if (restartDaemon) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_global_queue(0, 0), ^{
@@ -826,6 +874,16 @@ static void initConf(BOOL reset) {
     }
     if (!std::isfinite(upperPercent) || upperPercent < lowerPercent + 5 || upperPercent > 100) {
         setlocalKV(@"charge_above", @((int)std::fmax(80, lowerPercent + 5)));
+    }
+    // 恢复温度必须是电池真能降到的温度, 否则温控会变成单向锁: 一旦过热就永久停充
+    double tempAbove = getTempAsC(@"charge_temp_above");
+    double tempBelow = getTempAsC(@"charge_temp_below");
+    if (!std::isfinite(tempAbove) || tempAbove < 20 || tempAbove > 60) {
+        tempAbove = 35;
+        setTempAsC(@"charge_temp_above", tempAbove);
+    }
+    if (!std::isfinite(tempBelow) || tempBelow >= tempAbove || tempBelow < tempAbove - 10) {
+        setTempAsC(@"charge_temp_below", tempAbove - 5);
     }
     NSNumber* enable = getlocalKV(@"enable");
     g_enable = enable.boolValue;
@@ -905,6 +963,21 @@ static NSDictionary* handleReqLocked(NSDictionary* nsreq) {
                 return @{@"status": @-1};
             }
         }
+        if ([@[@"charge_temp_above", @"charge_temp_below"] containsObject:key]) {
+            if (![val isKindOfClass:NSNumber.class] || !std::isfinite([val doubleValue])) {
+                return @{@"status": @-1};
+            }
+            NSNumber* temp_mode = getlocalKV(@"temp_mode");
+            double c = temp_mode.intValue == 1 ? ([val doubleValue] - 32) / 1.8 : [val doubleValue];
+            BOOL isAbove = [key isEqualToString:@"charge_temp_above"];
+            double other = getTempAsC(isAbove ? @"charge_temp_below" : @"charge_temp_above");
+            double above = isAbove ? c : other;
+            double below = isAbove ? other : c;
+            // 恢复温度必须可达, 且与停充温度的间隔不能大到降不下来
+            if (above < 20 || above > 60 || below >= above || below < above - 10) {
+                return @{@"status": @-1};
+            }
+        }
         if ([key isEqualToString:@"floatwnd"]) {
             g_enable_floatwnd = [val boolValue];
             showFloatwnd(g_enable_floatwnd);
@@ -917,6 +990,7 @@ static NSDictionary* handleReqLocked(NSDictionary* nsreq) {
             g_enable = [val boolValue];
             if (!g_enable) {
                 resetBatteryStatus();
+                g_inhibit_active = NO;
             } else { // 启用时检查
                 NSNumber* val = getlocalKV(@"disable_smart_charge");
                 if (val.boolValue) {
@@ -931,8 +1005,10 @@ static NSDictionary* handleReqLocked(NSDictionary* nsreq) {
             }
         } else if ([key isEqualToString:@"adv_predictive_inhibit_charge"]) {
             resetBatteryStatus();
+            g_inhibit_active = NO;
         } else if ([key isEqualToString:@"adv_disable_inflow"]) {
             resetBatteryStatus();
+            g_inhibit_active = NO;
         } else if ([key isEqualToString:@"adv_prefer_smart"]) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_global_queue(0, 0), ^{
                 exit(0);
@@ -1285,6 +1361,10 @@ void detectUPSBattery() {
 }
 - (void)serve {
     initConf(NO);
+    // daemon被SIGKILL时atexit的还原不会执行, 电池会一直停在禁充状态。
+    // 启动时先无条件放开, 随后的首次评估会立刻按策略重新接管。
+    resetBatteryStatus();
+    g_inhibit_active = NO;
     initDB(nil);
     static GCDWebServer* _webServer = nil;
     if (_webServer == nil) {

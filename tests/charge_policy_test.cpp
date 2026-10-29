@@ -31,6 +31,14 @@ int main() {
     assert(evaluate(i,m).reason==Reason::Capacity);
     i.mah=4000; i.temperature=30; assert(evaluate(i,m).reason==Reason::Temperature);
     i.temperature=10; assert(evaluate(i,m).charge==1);
+    // 上限高于电池实际满容量时mAh读数永远到不了, 必须回落到百分比控制
+    i = {}; m = {}; i.enabled=true; i.connected=true; i.percent=70; i.mah=4120;
+    i.fullMah=4150; // stopMah 4308 > 4150
+    assert(evaluate(i,m).fallback && evaluate(i,m).charge==-1);
+    i.percent=85; assert(evaluate(i,m).fallback && evaluate(i,m).reason==Reason::Capacity);
+    i.fullMah=4400; m={}; assert(!evaluate(i,m).fallback && evaluate(i,m).charge==-1); // 可达则仍按mAh
+    i.fullMah=NAN; m={}; assert(!evaluate(i,m).fallback); // 读不到满容量时不改变原有行为
+
     Retry r; r.reset(0,0);
     assert(r.canWrite(0)); r.wrote(0,true,120); assert(!r.canWrite(119));
     r.observe(false,120); assert(r.canWrite(120)); r.wrote(120,false,120);

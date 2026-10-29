@@ -182,10 +182,10 @@ const App = {
             temp_mode: 0,
             temp_unit: null,
             charge_temp_above: 35,
-            charge_temp_below: 20,
+            charge_temp_below: 30,
             temp_above_min: 20,
             temp_above_max: 50,
-            temp_below_min: 10,
+            temp_below_min: 25,
             temp_below_max: 40,
             acc_charge: false,
             acc_charge_airmode: true,
@@ -239,6 +239,10 @@ const App = {
         }
     },
     methods: {
+        mah_limit_unreachable: function() { // 上限高于电池实际满容量时mAh控制会失效
+            var full = this.bat_info == null ? null : this.bat_info.NominalChargeCapacity;
+            return full != null && full > 0 && this.charge_above_mah > full;
+        },
         get_live_capacity: function() {
             var value = this.bat_info.AppleRawCurrentCapacity;
             return typeof value === 'number' && isFinite(value) && value >= 0 ? Math.round(value).toLocaleString() : '—';
@@ -856,6 +860,9 @@ const App = {
                     this.charge_temp_below = Math.max(Math.floor(t_f_to_c(this.charge_temp_below)), this.temp_below_min);
                 }
                 this.temp_below_max = this.charge_temp_above - 1; // 40
+                // 恢复温度必须是电池真能降到的温度, 否则温控会变成单向锁
+                this.temp_below_min = Math.max(10, this.charge_temp_above - 10);
+                this.charge_temp_below = Math.max(this.charge_temp_below, this.temp_below_min);
                 this.marks_temp = range(0, 60, 5).reduce((m, o)=>{m[o] = o + "°C"; return m;}, {});
             } else if (this.temp_mode == 1) { // 摄氏转华氏
                 this.temp_unit = "°F";
@@ -867,6 +874,9 @@ const App = {
                     this.charge_temp_below = Math.max(Math.floor(t_c_to_f(this.charge_temp_below)), this.temp_below_min);
                 }
                 this.temp_below_max = this.charge_temp_above - 1; // 40-104
+                // 同上, 华氏下10摄氏度的间隔约等于18华氏度
+                this.temp_below_min = Math.max(50, this.charge_temp_above - 18);
+                this.charge_temp_below = Math.max(this.charge_temp_below, this.temp_below_min);
                 this.marks_temp = range(30, 140, 5).reduce((m, o)=>{m[o] = o + "°F"; return m;}, {});
             }
         },
